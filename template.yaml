@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  api-lambda-test
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev  
+
+Globals:
+  Function:
+    Timeout: 10
+    Environment:
+      Variables:
+        NODE_OPTIONS: "--enable-source-maps"
+        STAGE: !Ref Stage
+
+Resources:
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: api-lambda-test-user-pool
+
+  CognitoDomainNameResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      Identifier: resources
+      Name: ApiLambdaCognitoUserPoolResourceServer
+      Scopes:
+        - ScopeDescription: "Get (scrape)"
+          ScopeName: get
+      UserPoolId: !Ref CognitoUserPool
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CognitoDomainNameResourceServer
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: api-lambda-test-user-pool-client
+      GenerateSecret: true
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - client_credentials
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthScopes:
+        - resources/get
+
+  CognitoDomainName:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: api-lambda-test-domain
+      UserPoolId: !Ref CognitoUserPool
+
+  ScraperLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+        - arn:aws:iam::aws:policy/AmazonCognitoPowerUser
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ScraperLambdaS3Policy
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:PutLifecycleConfiguration
+                Resource:
+                  - arn:aws:s3:::lambda-url-to-html-storage
+                  - arn:aws:s3:::lambda-url-to-html-storage/*
+
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: lambda-url-to-html-storage
+
+  ScraperFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: scraperfunction
+      Role: !GetAtt ScraperLambdaRole.Arn
+      Events:
+        ScraperApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ScraperApi
+            Path: /scrape
+            Method: get
+    Metadata:
+      DockerContext: ./lambda
+      Dockerfile: Dockerfile
+
+  ScraperApi:
+    Type: AWS::Serverless::Api
+    DependsOn: CognitoUserPoolClient
+    Properties:
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: ApiCognitoAuthorizer
+        Authorizers:
+          ApiCognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+            AuthorizationScopes:
+              - resources/get
+
+Outputs:
+  CognitoDomainName:
+    Description: "Cognito Domain Name URL"
+    Value: !Sub "https://${CognitoDomainName}.auth.${AWS::Region}.amazoncognito.com"
+  ScraperFunction:
+    Description: "Scraper Lambda Function ARN"
+    Value: !GetAtt ScraperFunction.Arn
+  ScraperLambdaIamRole:
+    Description: "Scraper Lambda IAM Role"
+    Value: !GetAtt ScraperLambdaRole.Arn
+  ScraperApiRootResourceId:
+    Description: "API Gateway Root API Resource ID"
+    Value: !GetAtt ScraperApi.RootResourceId
+  ScraperApi:
+    Description: "API Gateway endpoint URL for Scraper function"
+    Value: !Sub "https://${ScraperApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/scrape"
+  ScraperApiRestApiId:
+    Description: "API Gateway API ARN"
+    Value: !Ref ScraperApi
+    # Export:
+    #   Name: !Sub ${Stage}-ScraperApi-RestApiId
